@@ -31,4 +31,17 @@ public record SloMetrics(
     long outstandingRequests,
     RecoveryControlSettings settings,
     boolean fresh) {
+  boolean expiredAt(long now, long graceMs) {
+    return (settings == null && !fresh && requestCount == 0)
+        || generatedAtMs > now || now - generatedAtMs > graceMs;
+  }
+
+  boolean usable(RecoveryControlSettings limits) {
+    return requestCount >= limits.minimumObservations() && (p99Ms != null || errorRate > limits.maxErrorRate());
+  }
+
+  boolean healthy(RecoveryControlSettings limits) {
+    return p99Ms != null && usable(limits) && p99Ms <= limits.produceP99Ms() * limits.healthySloRatio()
+        && errorRate <= limits.maxErrorRate() * limits.healthySloRatio();
+  }
 }
