@@ -2,6 +2,20 @@
  * Copyright 2019 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.linkedin.kafka.cruisecontrol.config.constants;
 
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorNoopNotifier;
@@ -14,6 +28,7 @@ import com.linkedin.kafka.cruisecontrol.executor.strategy.PrioritizeSmallReplica
 import java.util.StringJoiner;
 import java.util.concurrent.TimeUnit;
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
 
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REASON_PARAM;
 import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
@@ -497,6 +512,31 @@ public final class ExecutorConfig {
   public static final String AUTO_STOP_EXTERNAL_AGENT_DOC = "When starting a new proposal execution while external agent is reassigning partitions,"
       + " automatically stop the external agent and start the execution."
       + " Set to false to keep the external agent reassignment and skip starting the execution.";
+
+  public static final String RECOVERY_CONTROL_ENABLED_CONFIG = "recovery.control.enabled";
+  public static final String RECOVERY_CONTROL_POLICY_CLASS_CONFIG = "recovery.control.policy.class";
+  public static final String RECOVERY_CONTROL_SLO_METRICS_PROVIDER_CLASS_CONFIG = "recovery.control.slo.metrics.provider.class";
+  public static final String RECOVERY_CONTROL_SLO_URL_CONFIG = "recovery.control.slo.url";
+  public static final String RECOVERY_CONTROL_INTERVAL_MS_CONFIG = "recovery.control.interval.ms";
+  public static final String RECOVERY_CONTROL_METRICS_WINDOW_MS_CONFIG = "recovery.control.metrics.window.ms";
+  public static final String RECOVERY_CONTROL_METRICS_STALE_GRACE_MS_CONFIG = "recovery.control.metrics.stale.grace.ms";
+  public static final String RECOVERY_CONTROL_INITIAL_THROTTLE_CONFIG = "recovery.control.initial.throttle.bytes.per.second";
+  public static final String RECOVERY_CONTROL_MIN_THROTTLE_CONFIG = "recovery.control.min.throttle.bytes.per.second";
+  public static final String RECOVERY_CONTROL_MAX_THROTTLE_CONFIG = "recovery.control.max.throttle.bytes.per.second";
+  public static final String RECOVERY_CONTROL_ADDITIVE_STEP_CONFIG = "recovery.control.additive.step.bytes.per.second";
+  public static final String RECOVERY_CONTROL_MAX_CHANGE_CONFIG = "recovery.control.max.change.bytes.per.second";
+  public static final String RECOVERY_CONTROL_MULTIPLICATIVE_DECREASE_CONFIG = "recovery.control.multiplicative.decrease";
+  public static final String RECOVERY_CONTROL_HEALTHY_SLO_RATIO_CONFIG = "recovery.control.healthy.slo.ratio";
+  public static final String RECOVERY_CONTROL_HEALTHY_WINDOWS_CONFIG = "recovery.control.healthy.windows";
+  public static final String RECOVERY_CONTROL_COOLDOWN_MS_CONFIG = "recovery.control.cooldown.ms";
+  public static final String RECOVERY_CONTROL_MINIMUM_OBSERVATIONS_CONFIG = "recovery.control.minimum.observations";
+  public static final String RECOVERY_CONTROL_SAFE_FALLBACK_THROTTLE_CONFIG = "recovery.control.safe.fallback.throttle.bytes.per.second";
+  public static final String RECOVERY_CONTROL_PROGRESS_FLOOR_CONFIG = "recovery.control.progress.floor.bytes.per.second";
+  public static final String RECOVERY_CONTROL_MIN_PROGRESS_CONFIG = "recovery.control.min.progress.bytes.per.second";
+  public static final String RECOVERY_CONTROL_NO_PROGRESS_WINDOWS_CONFIG = "recovery.control.no.progress.windows";
+
+  private static final long MIB = 1024L * 1024;
+
   private ExecutorConfig() {
   }
 
@@ -507,6 +547,7 @@ public final class ExecutorConfig {
    * @return The given ConfigDef after defining the configs for Executor.
    */
   public static ConfigDef define(ConfigDef configDef) {
+    defineRecoveryControl(configDef);
     return configDef.define(NUM_CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_CONFIG,
                             ConfigDef.Type.INT,
                             DEFAULT_NUM_CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER,
@@ -798,5 +839,58 @@ public final class ExecutorConfig {
                             DEFAULT_AUTO_STOP_EXTERNAL_AGENT,
                             ConfigDef.Importance.MEDIUM,
                             AUTO_STOP_EXTERNAL_AGENT_DOC);
+  }
+
+  private static void defineRecoveryControl(ConfigDef configDef) {
+    configDef.define(RECOVERY_CONTROL_ENABLED_CONFIG, ConfigDef.Type.BOOLEAN, false,
+                     ConfigDef.Importance.HIGH, "Enable adaptive replica recovery throttling.")
+             .define(RECOVERY_CONTROL_POLICY_CLASS_CONFIG, ConfigDef.Type.CLASS, null,
+                     ConfigDef.Importance.MEDIUM, "Optional class that decides the replica recovery throttle.")
+             .define(RECOVERY_CONTROL_SLO_METRICS_PROVIDER_CLASS_CONFIG, ConfigDef.Type.CLASS, null,
+                     ConfigDef.Importance.MEDIUM, "Optional class that supplies user-facing SLO metrics.")
+             .define(RECOVERY_CONTROL_SLO_URL_CONFIG, ConfigDef.Type.STRING, null,
+                     ConfigDef.Importance.MEDIUM, "Optional HTTP endpoint that supplies SLO metrics.")
+             .define(RECOVERY_CONTROL_INTERVAL_MS_CONFIG, ConfigDef.Type.LONG, 10000L, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Time between recovery control decisions, in milliseconds.")
+             .define(RECOVERY_CONTROL_METRICS_WINDOW_MS_CONFIG, ConfigDef.Type.LONG, 60000L, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "SLO metrics window duration, in milliseconds.")
+             .define(RECOVERY_CONTROL_METRICS_STALE_GRACE_MS_CONFIG, ConfigDef.Type.LONG, 30000L, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Maximum age of SLO metrics, in milliseconds.")
+             .define(RECOVERY_CONTROL_INITIAL_THROTTLE_CONFIG, ConfigDef.Type.LONG, 20 * MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Initial recovery throttle, in bytes per second.")
+             .define(RECOVERY_CONTROL_MIN_THROTTLE_CONFIG, ConfigDef.Type.LONG, MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Minimum recovery throttle, in bytes per second.")
+             .define(RECOVERY_CONTROL_MAX_THROTTLE_CONFIG, ConfigDef.Type.LONG, 100 * MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Maximum recovery throttle, in bytes per second.")
+             .define(RECOVERY_CONTROL_ADDITIVE_STEP_CONFIG, ConfigDef.Type.LONG, 5 * MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Additive throttle increase, in bytes per second.")
+             .define(RECOVERY_CONTROL_MAX_CHANGE_CONFIG, ConfigDef.Type.LONG, 20 * MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Maximum throttle change per decision, in bytes per second.")
+             .define(RECOVERY_CONTROL_MULTIPLICATIVE_DECREASE_CONFIG, ConfigDef.Type.DOUBLE, 0.7,
+                     (name, value) -> {
+                       if (!(value instanceof Double factor) || !(factor > 0 && factor < 1)) {
+                         throw new ConfigException(name, value, "Must be strictly between 0 and 1");
+                       }
+                     }, ConfigDef.Importance.MEDIUM, "Multiplier applied when reducing the throttle.")
+             .define(RECOVERY_CONTROL_HEALTHY_SLO_RATIO_CONFIG, ConfigDef.Type.DOUBLE, 0.85,
+                     (name, value) -> {
+                       if (!(value instanceof Double ratio) || !(ratio > 0 && ratio <= 1)) {
+                         throw new ConfigException(name, value, "Must be greater than 0 and at most 1");
+                       }
+                     }, ConfigDef.Importance.MEDIUM, "Fraction of the SLO limit used to classify a healthy window.")
+             .define(RECOVERY_CONTROL_HEALTHY_WINDOWS_CONFIG, ConfigDef.Type.INT, 2, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Consecutive healthy windows required before increasing throttle.")
+             .define(RECOVERY_CONTROL_COOLDOWN_MS_CONFIG, ConfigDef.Type.LONG, 20000L, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Cooldown after a throttle change, in milliseconds.")
+             .define(RECOVERY_CONTROL_MINIMUM_OBSERVATIONS_CONFIG, ConfigDef.Type.LONG, 100L, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Minimum observations required in an SLO metrics window.")
+             .define(RECOVERY_CONTROL_SAFE_FALLBACK_THROTTLE_CONFIG, ConfigDef.Type.LONG, null,
+                     ConfigDef.Importance.MEDIUM, "Throttle for stale metrics, in bytes per second. Defaults to the initial throttle.")
+             .define(RECOVERY_CONTROL_PROGRESS_FLOOR_CONFIG, ConfigDef.Type.LONG, 5 * MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Minimum throttle applied by the progress guard, in bytes per second.")
+             .define(RECOVERY_CONTROL_MIN_PROGRESS_CONFIG, ConfigDef.Type.LONG, MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Minimum rate of recovery progress, in bytes per second.")
+             .define(RECOVERY_CONTROL_NO_PROGRESS_WINDOWS_CONFIG, ConfigDef.Type.INT, 3, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Consecutive windows below the minimum progress rate before triggering the guard.");
   }
 }

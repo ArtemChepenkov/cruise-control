@@ -2,6 +2,20 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.linkedin.kafka.cruisecontrol.config;
 
 import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
@@ -56,6 +70,31 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
     sanityCheckSecurity();
     sanityCheckBalancingConstraints();
     sanityCheckWebServerUrlPrefix();
+  }
+
+  @Override
+  protected Map<String, Object> postProcessParsedConfig(Map<String, Object> parsedValues) {
+    String initialKey = ExecutorConfig.RECOVERY_CONTROL_INITIAL_THROTTLE_CONFIG;
+    String fallbackKey = ExecutorConfig.RECOVERY_CONTROL_SAFE_FALLBACK_THROTTLE_CONFIG;
+    String progressFloorKey = ExecutorConfig.RECOVERY_CONTROL_PROGRESS_FLOOR_CONFIG;
+    long min = (Long) parsedValues.get(ExecutorConfig.RECOVERY_CONTROL_MIN_THROTTLE_CONFIG);
+    long max = (Long) parsedValues.get(ExecutorConfig.RECOVERY_CONTROL_MAX_THROTTLE_CONFIG);
+    long initial = (Long) parsedValues.get(initialKey);
+    Long fallback = (Long) parsedValues.get(fallbackKey);
+
+    validateRecoveryThrottle(initialKey, initial, min, max);
+    validateRecoveryThrottle(progressFloorKey, (Long) parsedValues.get(progressFloorKey), min, max);
+    if (fallback == null) {
+      return Map.of(fallbackKey, initial);
+    }
+    validateRecoveryThrottle(fallbackKey, fallback, min, max);
+    return Map.of();
+  }
+
+  private static void validateRecoveryThrottle(String name, long throttle, long min, long max) {
+    if (throttle < min || throttle > max) {
+      throw new ConfigException(name, throttle, "Must be between " + min + " and " + max + " bytes per second");
+    }
   }
 
   /**

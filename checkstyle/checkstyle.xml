@@ -16,7 +16,7 @@ LinkedIn Java style.
 
     <!-- header -->
     <module name="RegexpHeader">
-        <property name="header" value="/\*\n Copyright [0-9]* LinkedIn Corp.*"/>
+        <property name="header" value="/\*\n( Copyright [0-9]* LinkedIn Corp.*| \* Licensed under the Apache License, Version 2\.0 .*)"/>
     </module>
 
     <property name="severity" value="${checkstyle.severity}" default="error"/>
