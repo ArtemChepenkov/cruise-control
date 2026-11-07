@@ -18,11 +18,21 @@ import com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorManager;
 import com.linkedin.kafka.cruisecontrol.exception.OngoingExecutionException;
 import com.linkedin.kafka.cruisecontrol.executor.concurrency.ConcurrencyAdjustingRecommendation;
 import com.linkedin.kafka.cruisecontrol.executor.concurrency.ExecutionConcurrencyManager;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.AimdThrottleControlPolicy;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.ControlDecision;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.HttpSloMetricsProvider;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.RecoveryController;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.RecoveryControlSettings;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.RecoveryControlState;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.RecoveryProgressSampler;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.SloMetricsProvider;
+import com.linkedin.kafka.cruisecontrol.executor.recovery.ThrottleControlPolicy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrategy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.StrategyOptions;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import com.linkedin.kafka.cruisecontrol.monitor.LoadMonitor;
 import com.linkedin.kafka.cruisecontrol.servlet.UserTaskManager;
+import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -105,6 +115,7 @@ public class Executor {
   private final Semaphore _flipOngoingExecutionMutex;
   private final Semaphore _noOngoingExecutionSemaphore;
   private volatile ExecutorState _executorState;
+  private volatile RecoveryControlState _recoveryControlState;
   private volatile String _uuid;
   private volatile Supplier<String> _reasonSupplier;
   private final ExecutorNotifier _executorNotifier;
@@ -748,6 +759,11 @@ public class Executor {
     return _executorState;
   }
 
+  /** @return the adaptive recovery snapshot, or null when no adaptive movement is active */
+  public RecoveryControlState recoveryControlState() {
+    return _recoveryControlState;
+  }
+
   /**
    * Enable or disable concurrency adjuster for the given concurrency type in the executor.
    *
@@ -823,15 +839,69 @@ public class Executor {
                                             String uuid,
                                             boolean isKafkaAssignerMode,
                                             boolean skipInterBrokerReplicaConcurrencyAdjustment) throws OngoingExecutionException {
+    executeProposals(proposals, unthrottledBrokers, removedBrokers, loadMonitor, requestedInterBrokerPartitionMovementConcurrency,
+                     requestedMaxClusterPartitionMovements, requestedIntraBrokerPartitionMovementConcurrency,
+                     requestedClusterLeadershipMovementConcurrency, requestedBrokerLeadershipMovementConcurrency,
+                     requestedExecutionProgressCheckIntervalMs, replicaMovementStrategy, replicationThrottle,
+                     isTriggeredByUserRequest, uuid, isKafkaAssignerMode, skipInterBrokerReplicaConcurrencyAdjustment, false);
+  }
+
+  /**
+   * Initialize proposal execution and start execution.
+   *
+   * @param proposals Proposals to be executed.
+   * @param unthrottledBrokers Brokers that are not throttled in terms of the number of in/out replica movements.
+   * @param removedBrokers Removed brokers, null if no brokers has been removed.
+   * @param loadMonitor Load monitor.
+   * @param requestedInterBrokerPartitionMovementConcurrency The maximum number of concurrent inter-broker partition movements
+   *                                                         per broker(if null, use num.concurrent.partition.movements.per.broker).
+   * @param requestedIntraBrokerPartitionMovementConcurrency The maximum number of concurrent intra-broker partition movements
+   *                                                         (if null, use num.concurrent.intra.broker.partition.movements).
+   * @param requestedMaxClusterPartitionMovements The upper bound of concurrent inter broker partition movements in cluster
+   *                                              (if null, use max.num.cluster.partition.movements).
+   * @param requestedClusterLeadershipMovementConcurrency The maximum number of concurrent leader movements in a cluster
+   *                                               (if null, use num.concurrent.leader.movements).
+   * @param requestedBrokerLeadershipMovementConcurrency The maximum number of concurrent leader movements involved in a broker
+   *                                               (if null, use num.concurrent.leader.movements.per.broker).
+   * @param requestedExecutionProgressCheckIntervalMs The interval between checking and updating the progress of an initiated
+   *                                                  execution (if null, use execution.progress.check.interval.ms).
+   * @param replicaMovementStrategy The strategy used to determine the execution order of generated replica movement tasks.
+   * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
+   *                            when executing a proposal (if null, no throttling is applied).
+   * @param isTriggeredByUserRequest Whether the execution is triggered by a user request.
+   * @param uuid UUID of the execution.
+   * @param isKafkaAssignerMode {@code true} if kafka assigner mode, {@code false} otherwise.
+   * @param skipInterBrokerReplicaConcurrencyAdjustment {@code true} to skip auto adjusting concurrency of inter-broker
+   * replica movements even if the concurrency adjuster is enabled, {@code false} otherwise.
+   * @param recoveryControl Whether the current request opts into adaptive throttling.
+   */
+  public synchronized void executeProposals(Collection<ExecutionProposal> proposals,
+                                            Set<Integer> unthrottledBrokers,
+                                            Set<Integer> removedBrokers,
+                                            LoadMonitor loadMonitor,
+                                            Integer requestedInterBrokerPartitionMovementConcurrency,
+                                            Integer requestedMaxClusterPartitionMovements,
+                                            Integer requestedIntraBrokerPartitionMovementConcurrency,
+                                            Integer requestedClusterLeadershipMovementConcurrency,
+                                            Integer requestedBrokerLeadershipMovementConcurrency,
+                                            Long requestedExecutionProgressCheckIntervalMs,
+                                            ReplicaMovementStrategy replicaMovementStrategy,
+                                            Long replicationThrottle,
+                                            boolean isTriggeredByUserRequest,
+                                            String uuid,
+                                            boolean isKafkaAssignerMode,
+                                            boolean skipInterBrokerReplicaConcurrencyAdjustment,
+                                            boolean recoveryControl) throws OngoingExecutionException {
     setExecutionMode(isKafkaAssignerMode);
     sanityCheckExecuteProposals(loadMonitor, uuid);
     _skipInterBrokerReplicaConcurrencyAdjustment = skipInterBrokerReplicaConcurrencyAdjustment;
     try {
+      RecoveryController recoveryController = createRecoveryController(_config, _time, uuid, replicationThrottle, recoveryControl);
       initProposalExecution(proposals, unthrottledBrokers, requestedInterBrokerPartitionMovementConcurrency, requestedMaxClusterPartitionMovements,
                             requestedIntraBrokerPartitionMovementConcurrency, requestedClusterLeadershipMovementConcurrency,
                             requestedBrokerLeadershipMovementConcurrency, requestedExecutionProgressCheckIntervalMs, replicaMovementStrategy,
                             isTriggeredByUserRequest, loadMonitor);
-      startExecution(loadMonitor, null, removedBrokers, replicationThrottle, isTriggeredByUserRequest);
+      startExecution(loadMonitor, null, removedBrokers, replicationThrottle, isTriggeredByUserRequest, recoveryController);
     } catch (Exception e) {
       if (e instanceof OngoingExecutionException) {
         LOG.info("User task {}: Broker removal operation aborted due to ongoing execution", uuid);
@@ -841,6 +911,36 @@ public class Executor {
       processExecuteProposalsFailure();
       throw e;
     }
+  }
+
+  static RecoveryController createRecoveryController(KafkaCruiseControlConfig config, Time time, String uuid,
+                                                     Long replicationThrottle, boolean requested) {
+    if (!requested || !config.getBoolean(ExecutorConfig.RECOVERY_CONTROL_ENABLED_CONFIG)) {
+      return null;
+    }
+    KafkaCruiseControlConfig executionConfig = config;
+    if (replicationThrottle != null) {
+      Map<String, Object> originals = config.originals();
+      originals.put(ExecutorConfig.RECOVERY_CONTROL_INITIAL_THROTTLE_CONFIG, replicationThrottle);
+      executionConfig = new KafkaCruiseControlConfig(originals);
+    }
+    // The Load Generator supplies the execution's SLO limits in the first valid metrics response.
+    RecoveryControlSettings settings = RecoveryControlSettings.fromConfig(executionConfig, Double.NaN, Double.NaN);
+    String policyClass = ExecutorConfig.RECOVERY_CONTROL_POLICY_CLASS_CONFIG;
+    ThrottleControlPolicy policy = executionConfig.getClass(policyClass) == null
+        ? new AimdThrottleControlPolicy() : executionConfig.getConfiguredInstance(policyClass, ThrottleControlPolicy.class);
+    String providerClass = ExecutorConfig.RECOVERY_CONTROL_SLO_METRICS_PROVIDER_CLASS_CONFIG;
+    SloMetricsProvider provider;
+    if (executionConfig.getClass(providerClass) == null) {
+      String url = executionConfig.getString(ExecutorConfig.RECOVERY_CONTROL_SLO_URL_CONFIG);
+      if (url == null || url.isBlank()) {
+        throw new IllegalArgumentException("An SLO metrics URL is required for adaptive recovery");
+      }
+      provider = new HttpSloMetricsProvider(time, URI.create(url), settings);
+    } else {
+      provider = executionConfig.getConfiguredInstance(providerClass, SloMetricsProvider.class);
+    }
+    return new RecoveryController(uuid, time, settings, provider, policy);
   }
 
   private void sanityCheckExecuteProposals(LoadMonitor loadMonitor, String uuid) throws OngoingExecutionException {
@@ -924,7 +1024,7 @@ public class Executor {
       initProposalExecution(proposals, demotedBrokers, concurrentSwaps, null, 0,
                             requestedClusterLeadershipMovementConcurrency, requestedBrokerLeadershipMovementConcurrency,
                             requestedExecutionProgressCheckIntervalMs, replicaMovementStrategy, isTriggeredByUserRequest, loadMonitor);
-      startExecution(loadMonitor, demotedBrokers, null, replicationThrottle, isTriggeredByUserRequest);
+      startExecution(loadMonitor, demotedBrokers, null, replicationThrottle, isTriggeredByUserRequest, null);
     } catch (Exception e) {
       processExecuteProposalsFailure();
       throw e;
@@ -1006,12 +1106,14 @@ public class Executor {
    * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
    *                            while moving partitions (if null, no throttling is applied).
    * @param isTriggeredByUserRequest Whether the execution is triggered by a user request.
+   * @param recoveryController The adaptive controller for this execution, or null for fixed throttling.
    */
   private void startExecution(LoadMonitor loadMonitor,
                               Collection<Integer> demotedBrokers,
                               Collection<Integer> removedBrokers,
                               Long replicationThrottle,
-                              boolean isTriggeredByUserRequest) throws OngoingExecutionException {
+                              boolean isTriggeredByUserRequest,
+                              RecoveryController recoveryController) throws OngoingExecutionException {
     _executionStoppedByUser.set(false);
     sanityCheckOngoingMovement();
 
@@ -1046,7 +1148,8 @@ public class Executor {
       _numExecutionStartedInNonKafkaAssignerMode.incrementAndGet();
     }
     _proposalExecutor.execute(
-        new ProposalExecutionRunnable(loadMonitor, demotedBrokers, removedBrokers, replicationThrottle, isTriggeredByUserRequest));
+        new ProposalExecutionRunnable(loadMonitor, demotedBrokers, removedBrokers, replicationThrottle,
+                                      isTriggeredByUserRequest, recoveryController));
   }
 
   /**
@@ -1300,6 +1403,8 @@ public class Executor {
     private final Set<Integer> _recentlyDemotedBrokers;
     private final Set<Integer> _recentlyRemovedBrokers;
     private final Long _replicationThrottle;
+    private final RecoveryController _recoveryController;
+    private final RecoveryProgressSampler _recoveryProgressSampler;
     private Throwable _executionException;
     private final boolean _isTriggeredByUserRequest;
     private long _lastSlowTaskReportingTimeMs;
@@ -1314,7 +1419,8 @@ public class Executor {
                               Collection<Integer> demotedBrokers,
                               Collection<Integer> removedBrokers,
                               Long replicationThrottle,
-                              boolean isTriggeredByUserRequest) {
+                              boolean isTriggeredByUserRequest,
+                              RecoveryController recoveryController) {
       _loadMonitor = loadMonitor;
       _demotedBrokers = demotedBrokers;
       _removedBrokers = removedBrokers;
@@ -1349,6 +1455,8 @@ public class Executor {
       _recentlyDemotedBrokers = recentlyDemotedBrokers();
       _recentlyRemovedBrokers = recentlyRemovedBrokers();
       _replicationThrottle = replicationThrottle;
+      _recoveryController = recoveryController;
+      _recoveryProgressSampler = recoveryController == null ? null : new RecoveryProgressSampler(_adminClient, _executionTaskManager, _time);
       _isTriggeredByUserRequest = isTriggeredByUserRequest;
       _lastSlowTaskReportingTimeMs = -1L;
       if (_removedBrokers != null && !_removedBrokers.isEmpty()) {
@@ -1604,54 +1712,86 @@ public class Executor {
       }
     }
 
+    private void rollbackFailedRecovery(Exception failure) {
+      List<ExecutionTask> active = new ArrayList<>(inExecutionTasks());
+      if (active.isEmpty()) {
+        return;
+      }
+      try {
+        stopExecution();
+        active.forEach(_executionTaskManager::markTaskDead);
+        handleDeadInterBrokerReplicaTasks(Collections.emptyList(), active);
+        updateOngoingExecutionState();
+      } catch (InterruptedException | ExecutionException | TimeoutException | RuntimeException rollbackFailure) {
+        failure.addSuppressed(rollbackFailure);
+      }
+    }
+
     private void interBrokerMoveReplicas() throws InterruptedException, ExecutionException, TimeoutException {
       Set<Integer> currentDeadBrokersWithReplicas = _loadMonitor.deadBrokersWithReplicas(MAX_METADATA_WAIT_MS);
-      ReplicationThrottleHelper throttleHelper = new ReplicationThrottleHelper(_adminClient, _replicationThrottle,
-          currentDeadBrokersWithReplicas);
+      Long initialThrottle = _replicationThrottle;
+      if (_recoveryController != null) {
+        initialThrottle = _recoveryController.state().currentThrottleBytesPerSecond();
+      }
       int numTotalPartitionMovements = _executionTaskManager.numRemainingInterBrokerPartitionMovements();
       long totalDataToMoveInMB = _executionTaskManager.remainingInterBrokerDataToMoveInMB();
       long startTime = System.currentTimeMillis();
       LOG.info("User task {}: Starting {} inter-broker partition movements.", _uuid, numTotalPartitionMovements);
 
-      int partitionsToMove = numTotalPartitionMovements;
-      // Exhaust all the pending partition movements.
-      while ((partitionsToMove > 0 || !inExecutionTasks().isEmpty()) && _stopSignal.get() == NO_STOP_EXECUTION) {
-        // Get tasks to execute.
-        List<ExecutionTask> tasksToExecute = _executionTaskManager.getInterBrokerReplicaMovementTasks();
-        LOG.info("User task {}: Executor will execute {} task(s)", _uuid, tasksToExecute.size());
+      try (ReplicationThrottleHelper throttleHelper = new ReplicationThrottleHelper(_adminClient, initialThrottle,
+                                                                                     currentDeadBrokersWithReplicas)) {
+        try {
+          int partitionsToMove = numTotalPartitionMovements;
+          // Exhaust all the pending partition movements.
+          while ((partitionsToMove > 0 || !inExecutionTasks().isEmpty()) && _stopSignal.get() == NO_STOP_EXECUTION) {
+            // Get tasks to execute.
+            List<ExecutionTask> tasksToExecute = _executionTaskManager.getInterBrokerReplicaMovementTasks();
+            LOG.info("User task {}: Executor will execute {} task(s)", _uuid, tasksToExecute.size());
 
-        AlterPartitionReassignmentsResult result = null;
-        if (!tasksToExecute.isEmpty()) {
-          throttleHelper.setThrottles(tasksToExecute.stream().map(ExecutionTask::proposal).collect(Collectors.toList()));
-          // Execute the tasks.
-          _executionTaskManager.markTasksInProgress(tasksToExecute);
-          result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute);
+            AlterPartitionReassignmentsResult result = null;
+            if (!tasksToExecute.isEmpty()) {
+              throttleHelper.setThrottles(tasksToExecute.stream().map(ExecutionTask::proposal).collect(Collectors.toList()));
+              if (_recoveryController != null) {
+                _recoveryControlState = _recoveryController.state();
+              }
+              // Execute the tasks.
+              _executionTaskManager.markTasksInProgress(tasksToExecute);
+              result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute);
+            }
+            // Wait indefinitely for partition movements to finish.
+            List<ExecutionTask> completedTasks = waitForInterBrokerReplicaTasksToFinish(result, throttleHelper);
+            partitionsToMove = _executionTaskManager.numRemainingInterBrokerPartitionMovements();
+            int numFinishedPartitionMovements = _executionTaskManager.numFinishedInterBrokerPartitionMovements();
+            long finishedDataMovementInMB = _executionTaskManager.finishedInterBrokerDataMovementInMB();
+            updatePartitionMovementMetrics(numFinishedPartitionMovements, finishedDataMovementInMB, System.currentTimeMillis() - startTime);
+            LOG.info("User task {}: {}/{} ({}%) inter-broker partition movements completed. {}/{} ({}%) MB have been moved.",
+                     _uuid,
+                     numFinishedPartitionMovements, numTotalPartitionMovements,
+                     String.format("%.2f", numFinishedPartitionMovements * UNIT_INTERVAL_TO_PERCENTAGE / numTotalPartitionMovements),
+                     finishedDataMovementInMB, totalDataToMoveInMB,
+                     totalDataToMoveInMB == 0 ? 100 : String.format("%.2f", finishedDataMovementInMB * UNIT_INTERVAL_TO_PERCENTAGE
+                                                                            / totalDataToMoveInMB));
+            List<ExecutionTask> inProgressTasks = tasksToExecute.stream()
+                .filter(t -> t.state() == ExecutionTaskState.IN_PROGRESS)
+                .collect(Collectors.toList());
+            inProgressTasks.addAll(inExecutionTasks());
+
+            throttleHelper.clearThrottles(completedTasks, inProgressTasks);
+          }
+        } catch (InterruptedException | ExecutionException | TimeoutException | RuntimeException failure) {
+          if (_recoveryController != null) {
+            rollbackFailedRecovery(failure);
+          }
+          throw failure;
         }
-        // Wait indefinitely for partition movements to finish.
-        List<ExecutionTask> completedTasks = waitForInterBrokerReplicaTasksToFinish(result);
-        partitionsToMove = _executionTaskManager.numRemainingInterBrokerPartitionMovements();
-        int numFinishedPartitionMovements = _executionTaskManager.numFinishedInterBrokerPartitionMovements();
-        long finishedDataMovementInMB = _executionTaskManager.finishedInterBrokerDataMovementInMB();
-        updatePartitionMovementMetrics(numFinishedPartitionMovements, finishedDataMovementInMB, System.currentTimeMillis() - startTime);
-        LOG.info("User task {}: {}/{} ({}%) inter-broker partition movements completed. {}/{} ({}%) MB have been moved.",
-                 _uuid,
-                 numFinishedPartitionMovements, numTotalPartitionMovements,
-                 String.format("%.2f", numFinishedPartitionMovements * UNIT_INTERVAL_TO_PERCENTAGE / numTotalPartitionMovements),
-                 finishedDataMovementInMB, totalDataToMoveInMB,
-                 totalDataToMoveInMB == 0 ? 100 : String.format("%.2f", finishedDataMovementInMB * UNIT_INTERVAL_TO_PERCENTAGE
-                                                                        / totalDataToMoveInMB));
-        List<ExecutionTask> inProgressTasks = tasksToExecute.stream()
-            .filter(t -> t.state() == ExecutionTaskState.IN_PROGRESS)
-            .collect(Collectors.toList());
-        inProgressTasks.addAll(inExecutionTasks());
-
-        throttleHelper.clearThrottles(completedTasks, inProgressTasks);
+      } finally {
+        if (_recoveryController != null) {
+          _recoveryController.stop();
+          _recoveryControlState = null;
+        }
+        // Leadership movement uses the initial progress check interval.
+        resetExecutionProgressCheckIntervalMs();
       }
-
-      // Currently, _executionProgressCheckIntervalMs is only runtime adjusted for inter broker move tasks, not
-      // in leadership move task. Thus reset it to initial value once interBrokerMoveReplicas has stopped to
-      // have it been safely used in following leadership move tasks.
-      resetExecutionProgressCheckIntervalMs();
 
       // At this point it is guaranteed that there are no in execution tasks to wait -- i.e. all tasks are completed or dead.
       if (_stopSignal.get() == NO_STOP_EXECUTION) {
@@ -1806,10 +1946,11 @@ public class Executor {
      * Periodically checks the metadata to see if inter-broker replica reassignment has finished or not.
      * @param result the result of a request to alter partition reassignments -- can be {@code null} if no new tasks
      *               for the execution are submitted.
-     *
+     * @param throttleHelper the throttle owner for all batches in this execution.
      * @return Finished tasks.
      */
-    private List<ExecutionTask> waitForInterBrokerReplicaTasksToFinish(AlterPartitionReassignmentsResult result)
+    private List<ExecutionTask> waitForInterBrokerReplicaTasksToFinish(AlterPartitionReassignmentsResult result,
+                                                                     ReplicationThrottleHelper throttleHelper)
         throws InterruptedException, ExecutionException, TimeoutException {
       List<ExecutionTask> finishedTasks = new ArrayList<>();
       Set<Long> stoppedTaskIds = new HashSet<>();
@@ -1829,6 +1970,17 @@ public class Executor {
       boolean retry;
       do {
         Cluster cluster = getClusterForExecutionProgressCheck();
+        if (_recoveryController != null && _stopSignal.get() == NO_STOP_EXECUTION && !inExecutionTasks().isEmpty()) {
+          ControlDecision decision = _recoveryController.onProgressCheck(_recoveryProgressSampler.sample(inExecutionTasks()), null, null)
+              .orElse(null);
+          if (decision != null && _stopSignal.get() == NO_STOP_EXECUTION) {
+            throttleHelper.updateThrottleRate(decision.throttleBytesPerSecond());
+          }
+          if (_stopSignal.get() == NO_STOP_EXECUTION) {
+            // Only report a new rate after the broker configuration update has completed.
+            _recoveryControlState = _recoveryController.state();
+          }
+        }
         List<ExecutionTask> deadInterBrokerReplicaTasks = new ArrayList<>();
         List<ExecutionTask> stoppedInterBrokerReplicaTasks = new ArrayList<>();
         List<ExecutionTask> slowTasksToReport = new ArrayList<>();

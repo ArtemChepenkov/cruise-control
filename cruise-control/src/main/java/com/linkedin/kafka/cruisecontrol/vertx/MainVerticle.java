@@ -79,6 +79,7 @@ public class MainVerticle extends AbstractVerticle {
 
   private Router buildRouter(RouterBuilder builder) {
     builder.operation("state").handler(_endPoints::handle);
+    builder.operation("recoveryControl").handler(_endPoints::handle);
     builder.operation("kafkaClusterState").handler(_endPoints::handle);
     builder.operation("load").handler(_endPoints::handle);
     builder.operation("userTasks").handler(_endPoints::handle);

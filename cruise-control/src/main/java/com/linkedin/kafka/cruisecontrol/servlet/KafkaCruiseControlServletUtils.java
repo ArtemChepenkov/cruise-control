@@ -129,6 +129,9 @@ public final class KafkaCruiseControlServletUtils {
     requestParameterConfigs.put(PARTITION_LOAD, partitionLoad);
     requestParameterConfigs.put(PROPOSALS, proposals);
     requestParameterConfigs.put(STATE, state);
+    requestParameterConfigs.put(RECOVERY_CONTROL, new RequestParameterWrapper(RECOVERY_CONTROL_PARAMETERS_CLASS_CONFIG,
+                                                                              RECOVERY_CONTROL_PARAMETER_OBJECT_CONFIG,
+                                                                              RECOVERY_CONTROL_REQUEST_CLASS_CONFIG));
     requestParameterConfigs.put(ADD_BROKER, addBroker);
     requestParameterConfigs.put(REMOVE_BROKER, removeBroker);
     requestParameterConfigs.put(FIX_OFFLINE_REPLICAS, fixOfflineReplicas);

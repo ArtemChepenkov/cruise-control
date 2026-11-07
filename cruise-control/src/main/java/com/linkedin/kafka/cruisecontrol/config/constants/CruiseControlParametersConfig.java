@@ -14,6 +14,7 @@ import com.linkedin.kafka.cruisecontrol.servlet.parameters.BootstrapParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ProposalsParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.CruiseControlStateParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.KafkaClusterStateParameters;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.RecoveryControlParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.UserTasksParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ReviewBoardParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.ReviewParameters;
@@ -91,6 +92,8 @@ public final class CruiseControlParametersConfig {
   public static final String KAFKA_CLUSTER_STATE_PARAMETERS_CLASS_CONFIG = "kafka.cluster.state.parameters.class";
   public static final String DEFAULT_KAFKA_CLUSTER_STATE_PARAMETERS_CLASS = KafkaClusterStateParameters.class.getName();
   public static final String KAFKA_CLUSTER_STATE_PARAMETERS_CLASS_DOC = "The class for parameters of a kafka cluster state request.";
+
+  public static final String RECOVERY_CONTROL_PARAMETERS_CLASS_CONFIG = "recovery.control.parameters.class";
 
   /**
    * <code>user.tasks.parameters.class</code>
@@ -245,6 +248,11 @@ public final class CruiseControlParametersConfig {
                             DEFAULT_KAFKA_CLUSTER_STATE_PARAMETERS_CLASS,
                             ConfigDef.Importance.MEDIUM,
                             KAFKA_CLUSTER_STATE_PARAMETERS_CLASS_DOC)
+                    .define(RECOVERY_CONTROL_PARAMETERS_CLASS_CONFIG,
+                            ConfigDef.Type.CLASS,
+                            RecoveryControlParameters.class,
+                            ConfigDef.Importance.MEDIUM,
+                            "The class for parameters of a recovery control status request.")
                     .define(USER_TASKS_PARAMETERS_CLASS_CONFIG,
                             ConfigDef.Type.CLASS,
                             DEFAULT_USER_TASKS_PARAMETERS_CLASS,

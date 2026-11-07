@@ -34,6 +34,8 @@ paths:
     $ref: 'endpoints/permissions.yaml#/PermissionsEndpoint'
   /rebalance:
     $ref: 'endpoints/rebalance.yaml#/RebalanceEndpoint'
+  /recovery_control:
+    $ref: 'endpoints/recoveryControl.yaml#/RecoveryControlEndpoint'
   /remove_broker:
     $ref: 'endpoints/removeBroker.yaml#/RemoveBrokerEndpoint'
   /rightsize:

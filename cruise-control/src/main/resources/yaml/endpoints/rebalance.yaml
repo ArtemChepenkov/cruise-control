@@ -168,6 +168,12 @@ RebalanceEndpoint:
           type: integer
           format: int64
           minimum: 5000
+      - name: recovery_control
+        in: query
+        description: Use adaptive throttle for this execution if recovery.control.enabled is enabled.
+        schema:
+          type: boolean
+          default: false
       - name: reason
         in: query
         description: Reason for request.

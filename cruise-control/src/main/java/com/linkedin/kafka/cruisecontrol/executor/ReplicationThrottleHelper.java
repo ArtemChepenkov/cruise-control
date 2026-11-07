@@ -33,7 +33,7 @@ import java.util.stream.Stream;
 /**
  * See https://kafka.apache.org/documentation/#rep-throttle
  */
-class ReplicationThrottleHelper {
+class ReplicationThrottleHelper implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(ReplicationThrottleHelper.class);
   static final String WILDCARD_ASTERISK = "*";
   static final String LEADER_REPLICATION_THROTTLED_RATE_CONFIG = "leader.replication.throttled.rate";
@@ -44,9 +44,12 @@ class ReplicationThrottleHelper {
   static final int RETRIES = 30;
 
   private final AdminClient _adminClient;
-  private final Long _throttleRate;
+  private Long _throttleRate;
   private final int _retries;
   private final Set<Integer> _deadBrokers;
+  private final Set<Integer> _throttledBrokers = new TreeSet<>();
+  private final Set<Integer> _brokerRateWrites = new TreeSet<>();
+  private final Map<String, Set<String>> _throttledReplicas = new HashMap<>();
 
   ReplicationThrottleHelper(AdminClient adminClient, Long throttleRate) {
     this(adminClient, throttleRate, RETRIES);
@@ -71,7 +74,7 @@ class ReplicationThrottleHelper {
     this._deadBrokers = deadBrokers;
   }
 
-  void setThrottles(List<ExecutionProposal> replicaMovementProposals)
+  synchronized void setThrottles(List<ExecutionProposal> replicaMovementProposals)
   throws ExecutionException, InterruptedException, TimeoutException {
     if (throttlingEnabled()) {
       LOG.info("Setting a rebalance throttle of {} bytes/sec", _throttleRate);
@@ -83,6 +86,23 @@ class ReplicationThrottleHelper {
       for (Map.Entry<String, Set<String>> entry : throttledReplicas.entrySet()) {
         setThrottledReplicas(entry.getKey(), entry.getValue());
       }
+    }
+  }
+
+  /**
+   * Set the rate for brokers in the current movement and for subsequent batches.
+   * Topic replica lists are updated by the existing batch lifecycle.
+   *
+   * @param throttleBytesPerSecond the new replication rate
+   */
+  public synchronized void updateThrottleRate(long throttleBytesPerSecond)
+      throws ExecutionException, InterruptedException, TimeoutException {
+    if (!throttlingEnabled() || throttleBytesPerSecond <= 0) {
+      throw new IllegalArgumentException("Rate updates require a positive rate and an active throttle");
+    }
+    _throttleRate = throttleBytesPerSecond;
+    for (int broker : _throttledBrokers) {
+      setThrottledRateIfNecessary(broker);
     }
   }
 
@@ -104,7 +124,7 @@ class ReplicationThrottleHelper {
   }
 
   // clear throttles for a specific list of execution tasks
-  void clearThrottles(List<ExecutionTask> completedTasks, List<ExecutionTask> inProgressTasks)
+  synchronized void clearThrottles(List<ExecutionTask> completedTasks, List<ExecutionTask> inProgressTasks)
   throws ExecutionException, InterruptedException, TimeoutException {
     if (throttlingEnabled()) {
       List<ExecutionProposal> completedProposals =
@@ -138,12 +158,61 @@ class ReplicationThrottleHelper {
       LOG.info("Removing replica movement throttles from brokers in the cluster: {}", brokersToRemoveThrottlesFrom);
       for (int broker : brokersToRemoveThrottlesFrom) {
         removeThrottledRateFromBroker(broker);
+        _throttledBrokers.remove(broker);
+        _brokerRateWrites.remove(broker);
       }
 
       Map<String, Set<String>> throttledReplicas = getThrottledReplicasByTopic(completedProposals);
       for (Map.Entry<String, Set<String>> entry : throttledReplicas.entrySet()) {
         removeThrottledReplicasFromTopic(entry.getKey(), entry.getValue());
+        Set<String> tracked = _throttledReplicas.get(entry.getKey());
+        if (tracked != null) {
+          tracked.removeAll(entry.getValue());
+          if (tracked.isEmpty()) {
+            _throttledReplicas.remove(entry.getKey());
+          }
+        }
       }
+    }
+  }
+
+  /**
+   * Finish the usual throttle cleanup for resources left by a stopped or failed batch.
+   * Attempt each resource independently so that one unavailable broker cannot prevent the other cleanup calls.
+   */
+  @Override
+  public synchronized void close() throws ExecutionException {
+    List<Exception> failures = new ArrayList<>();
+    boolean interrupted = Thread.interrupted();
+    try {
+      for (int broker : new ArrayList<>(_brokerRateWrites)) {
+        try {
+          removeThrottledRateFromBroker(broker);
+          _throttledBrokers.remove(broker);
+          _brokerRateWrites.remove(broker);
+        } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException failure) {
+          failures.add(failure);
+          interrupted |= failure instanceof InterruptedException;
+        }
+      }
+      for (Map.Entry<String, Set<String>> entry : new HashMap<>(_throttledReplicas).entrySet()) {
+        try {
+          removeThrottledReplicasFromTopic(entry.getKey(), entry.getValue());
+          _throttledReplicas.remove(entry.getKey());
+        } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException failure) {
+          failures.add(failure);
+          interrupted |= failure instanceof InterruptedException;
+        }
+      }
+    } finally {
+      if (interrupted) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    if (!failures.isEmpty()) {
+      ExecutionException cleanup = new ExecutionException("Failed to clear replication throttles", failures.get(0));
+      failures.stream().skip(1).forEach(cleanup::addSuppressed);
+      throw cleanup;
     }
   }
 
@@ -181,6 +250,7 @@ class ReplicationThrottleHelper {
       throw new IllegalStateException("Throttle rate cannot be null");
     }
     Config brokerConfigs = getBrokerConfigs(brokerId);
+    _throttledBrokers.add(brokerId);
     List<AlterConfigOp> ops = new ArrayList<>();
     for (String replicaThrottleRateConfigKey : Arrays.asList(LEADER_REPLICATION_THROTTLED_RATE_CONFIG, FOLLOWER_REPLICATION_THROTTLED_RATE_CONFIG)) {
       ConfigEntry currThrottleRate = brokerConfigs.get(replicaThrottleRateConfigKey);
@@ -190,6 +260,8 @@ class ReplicationThrottleHelper {
       }
     }
     if (!ops.isEmpty()) {
+      // Record ownership before sending a write whose outcome may be unknown after a timeout.
+      _brokerRateWrites.add(brokerId);
       changeBrokerConfigs(brokerId, ops);
     }
   }
@@ -235,6 +307,7 @@ class ReplicationThrottleHelper {
       ops.add(new AlterConfigOp(new ConfigEntry(replicaThrottleConfigKey, String.join(",", newThrottledReplicas)), AlterConfigOp.OpType.SET));
     }
     if (!ops.isEmpty()) {
+      _throttledReplicas.computeIfAbsent(topic, ignored -> new TreeSet<>()).addAll(replicas);
       changeTopicConfigs(topic, ops);
     }
   }
@@ -381,8 +454,10 @@ class ReplicationThrottleHelper {
         if (entry.getValue() != null) {
           return false;
         }
-      } else if (configEntry.source().equals(ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG) && entry.getValue() == null) {
-        LOG.debug("Found static broker config: {}, skipping comparison", configEntry);
+      } else if (entry.getValue() == null && (configEntry.source() == ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG
+          || configEntry.source() == ConfigEntry.ConfigSource.DEFAULT_CONFIG
+          || configEntry.source() == ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG)) {
+        LOG.debug("Found inherited config after delete: {}", configEntry);
       } else if (!Objects.equals(entry.getValue(), configEntry.value())) {
         return false;
       }

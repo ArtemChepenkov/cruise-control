@@ -1,0 +1,52 @@
+RecoveryControlStatus:
+  type: object
+  required:
+    - version
+    - enabled
+    - executionId
+    - currentThrottleBytesPerSecond
+    - remainingBytes
+    - progressBytesPerSecond
+    - lastAction
+    - constraintState
+    - reason
+    - warnings
+    - decisionTimestampMs
+  properties:
+    version:
+      type: integer
+      format: int32
+    enabled:
+      type: boolean
+    executionId:
+      type: string
+      nullable: true
+    currentThrottleBytesPerSecond:
+      type: integer
+      format: int64
+      nullable: true
+    remainingBytes:
+      type: integer
+      format: int64
+      nullable: true
+    progressBytesPerSecond:
+      type: integer
+      format: int64
+      nullable: true
+    lastAction:
+      type: string
+      nullable: true
+    constraintState:
+      type: string
+      nullable: true
+    reason:
+      type: string
+      nullable: true
+    warnings:
+      type: array
+      items:
+        type: string
+    decisionTimestampMs:
+      type: integer
+      format: int64
+      nullable: true

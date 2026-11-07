@@ -1,0 +1,41 @@
+RecoveryControlEndpoint:
+  get:
+    operationId: recoveryControl
+    summary: Read the current adaptive replica recovery status.
+    parameters:
+      - name: json
+        in: query
+        description: Return the response in JSON format.
+        schema:
+          type: boolean
+          default: false
+      - name: get_response_schema
+        in: query
+        description: Return the JSON schema in a response header.
+        schema:
+          type: boolean
+          default: false
+      - name: doAs
+        in: query
+        description: The user specified by a trusted proxy in that authentication model.
+        schema:
+          type: string
+    responses:
+      '200':
+        description: Recovery state for the active execution or inactive status.
+        content:
+          application/json:
+            schema:
+              $ref: '../responses/recoveryControlStatus.yaml#/RecoveryControlStatus'
+          text/plain:
+            schema:
+              type: string
+      default:
+        description: Error response.
+        content:
+          application/json:
+            schema:
+              $ref: '../responses/errorResponse.yaml#/ErrorResponse'
+          text/plain:
+            schema:
+              type: string

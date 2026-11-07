@@ -175,7 +175,7 @@ public final class ResponseUtils {
       }
       result.append("}}");
     } else if (node.isJsonNull()) {
-      result.append("}");
+      result.append("null\" }");
     }
 
     return result.toString();

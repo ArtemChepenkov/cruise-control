@@ -92,6 +92,7 @@ public final class ParameterUtils {
   public static final String THROTTLE_ADDED_BROKER_PARAM = "throttle_added_broker";
   public static final String THROTTLE_REMOVED_BROKER_PARAM = "throttle_removed_broker";
   public static final String REPLICATION_THROTTLE_PARAM = "replication_throttle";
+  public static final String RECOVERY_CONTROL_PARAM = "recovery_control";
   public static final String IGNORE_PROPOSAL_CACHE_PARAM = "ignore_proposal_cache";
   public static final String USE_READY_DEFAULT_GOALS_PARAM = "use_ready_default_goals";
   public static final String EXECUTION_PROGRESS_CHECK_INTERVAL_MS_PARAM = "execution_progress_check_interval_ms";
@@ -149,6 +150,7 @@ public final class ParameterUtils {
   public static final String PROPOSALS_PARAMETER_OBJECT_CONFIG = "proposals.parameter.object";
   public static final String STATE_PARAMETER_OBJECT_CONFIG = "state.parameter.object";
   public static final String KAFKA_CLUSTER_STATE_PARAMETER_OBJECT_CONFIG = "kafka.cluster.state.parameter.object";
+  public static final String RECOVERY_CONTROL_PARAMETER_OBJECT_CONFIG = "recovery.control.parameter.object";
   public static final String USER_TASKS_PARAMETER_OBJECT_CONFIG = "user.tasks.parameter.object";
   public static final String REVIEW_BOARD_PARAMETER_OBJECT_CONFIG = "review.board.parameter.object";
   public static final String ADD_BROKER_PARAMETER_OBJECT_CONFIG = "add.broker.parameter.object";

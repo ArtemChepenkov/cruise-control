@@ -20,6 +20,7 @@ import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.RightsizeRequest;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.AdminRequest;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.BootstrapRequest;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.KafkaClusterStateRequest;
+import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.RecoveryControlRequest;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.PauseRequest;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.ResumeRequest;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.sync.ReviewBoardRequest;
@@ -91,6 +92,8 @@ public final class CruiseControlRequestConfig {
   public static final String KAFKA_CLUSTER_STATE_REQUEST_CLASS_CONFIG = "kafka.cluster.state.request.class";
   public static final String DEFAULT_KAFKA_CLUSTER_STATE_REQUEST_CLASS = KafkaClusterStateRequest.class.getName();
   public static final String KAFKA_CLUSTER_STATE_REQUEST_CLASS_DOC = "The class to handle a kafka cluster state request.";
+
+  public static final String RECOVERY_CONTROL_REQUEST_CLASS_CONFIG = "recovery.control.request.class";
 
   /**
    * <code>user.tasks.request.class</code>
@@ -247,6 +250,11 @@ public final class CruiseControlRequestConfig {
                             DEFAULT_KAFKA_CLUSTER_STATE_REQUEST_CLASS,
                             ConfigDef.Importance.MEDIUM,
                             KAFKA_CLUSTER_STATE_REQUEST_CLASS_DOC)
+                    .define(RECOVERY_CONTROL_REQUEST_CLASS_CONFIG,
+                            ConfigDef.Type.CLASS,
+                            RecoveryControlRequest.class,
+                            ConfigDef.Importance.MEDIUM,
+                            "The class to handle a recovery control status request.")
                     .define(USER_TASKS_REQUEST_CLASS_CONFIG,
                             ConfigDef.Type.CLASS,
                             DEFAULT_USER_TASKS_REQUEST_CLASS,
