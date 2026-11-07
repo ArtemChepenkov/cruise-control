@@ -61,13 +61,14 @@ public abstract class AbstractReplicaMovementStrategy implements ReplicaMovement
   @Override
   public Map<Integer, SortedSet<ExecutionTask>> applyStrategy(Set<ExecutionTask> replicaMovementTasks, StrategyOptions strategyOptions) {
     Map<Integer, SortedSet<ExecutionTask>> tasksByBrokerId = new HashMap<>();
+    Comparator<ExecutionTask> comparator = taskComparator(strategyOptions);
 
     for (ExecutionTask task : replicaMovementTasks) {
       ExecutionProposal proposal = task.proposal();
 
       // Add the task to source broker's execution plan
       SortedSet<ExecutionTask> sourceBrokerTaskSet = tasksByBrokerId.computeIfAbsent(proposal.oldLeader().brokerId(),
-                                                                                     k -> new TreeSet<>(taskComparator(strategyOptions)));
+                                                                                     k -> new TreeSet<>(comparator));
       if (!sourceBrokerTaskSet.add(task)) {
         throw new IllegalStateException("Replica movement strategy " + this.getClass().getSimpleName() + " failed to determine order of tasks.");
       }
@@ -75,7 +76,7 @@ public abstract class AbstractReplicaMovementStrategy implements ReplicaMovement
       // Add the task to destination brokers' execution plan
       for (ReplicaPlacementInfo destinationBroker : proposal.replicasToAdd()) {
         SortedSet<ExecutionTask> destinationBrokerTaskSet = tasksByBrokerId.computeIfAbsent(destinationBroker.brokerId(),
-                                                                                            k -> new TreeSet<>(taskComparator(strategyOptions)));
+                                                                                            k -> new TreeSet<>(comparator));
         if (!destinationBrokerTaskSet.add(task)) {
           throw new IllegalStateException("Replica movement strategy " + this.getClass().getSimpleName() + " failed to determine order of tasks.");
         }

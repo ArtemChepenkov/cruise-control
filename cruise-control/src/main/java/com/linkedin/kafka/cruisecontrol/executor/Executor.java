@@ -8,6 +8,8 @@ import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import com.google.common.util.concurrent.AtomicDouble;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricValues;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.ValuesAndExtrapolations;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.common.TopicMinIsrCache;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
@@ -28,14 +30,18 @@ import com.linkedin.kafka.cruisecontrol.executor.recovery.RecoveryProgressSample
 import com.linkedin.kafka.cruisecontrol.executor.recovery.SloMetricsProvider;
 import com.linkedin.kafka.cruisecontrol.executor.recovery.ThrottleControlPolicy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrategy;
+import com.linkedin.kafka.cruisecontrol.executor.strategy.RiskAwareReplicaMovementStrategy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.StrategyOptions;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import com.linkedin.kafka.cruisecontrol.monitor.LoadMonitor;
+import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerEntity;
 import com.linkedin.kafka.cruisecontrol.servlet.UserTaskManager;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -943,6 +949,39 @@ public class Executor {
     return new RecoveryController(uuid, time, settings, provider, policy);
   }
 
+  private StrategyOptions movementStrategyOptions(LoadMonitor loadMonitor) {
+    StrategyOptions.Builder options = new StrategyOptions.Builder(_metadataClient.refreshMetadata().cluster())
+        .minIsrWithTimeByTopic(_topicMinIsrCache.minIsrWithTimeByTopic());
+    String riskStrategy = RiskAwareReplicaMovementStrategy.class.getName();
+    List<String> allowedStrategies = _config.getList(ExecutorConfig.REPLICA_MOVEMENT_STRATEGIES_CONFIG);
+    List<String> defaultStrategies = _config.getList(ExecutorConfig.DEFAULT_REPLICA_MOVEMENT_STRATEGIES_CONFIG);
+    if ((allowedStrategies != null && allowedStrategies.contains(riskStrategy))
+        || (defaultStrategies != null && defaultStrategies.contains(riskStrategy))) {
+      options.brokerLoadRatios(recoveryBrokerCpuRatios(loadMonitor.currentBrokerMetricValues()));
+    }
+    return options.build();
+  }
+
+  static Map<Integer, Double> recoveryBrokerCpuRatios(Map<BrokerEntity, ValuesAndExtrapolations> metricsByBroker) {
+    short cpuId = KafkaMetricDef.brokerMetricDef().metricInfo(KafkaMetricDef.CPU_USAGE.name()).id();
+    Map<Integer, Double> ratios = new HashMap<>();
+    for (Map.Entry<BrokerEntity, ValuesAndExtrapolations> entry : metricsByBroker.entrySet()) {
+      ValuesAndExtrapolations metrics = entry.getValue();
+      if (metrics == null || !metrics.extrapolations().isEmpty()) {
+        continue;
+      }
+      MetricValues cpu = metrics.metricValues().valuesFor(cpuId);
+      if (cpu == null || cpu.length() == 0) {
+        continue;
+      }
+      double ratio = cpu.latest();
+      if (Double.isFinite(ratio) && ratio >= 0.0 && ratio <= 1.0) {
+        ratios.put(entry.getKey().brokerId(), ratio);
+      }
+    }
+    return ratios;
+  }
+
   private void sanityCheckExecuteProposals(LoadMonitor loadMonitor, String uuid) throws OngoingExecutionException {
     if (_hasOngoingExecution) {
       throw new OngoingExecutionException("Cannot execute new proposals while there is an ongoing execution.");
@@ -974,10 +1013,8 @@ public class Executor {
     _executorState = ExecutorState.initializeProposalExecution(_uuid, _reasonSupplier.get(), recentlyDemotedBrokers(),
                                                                recentlyRemovedBrokers(), isTriggeredByUserRequest);
     _executionTaskManager.setExecutionModeForTaskTracker(_isKafkaAssignerMode);
-    // Get a snapshot of (1) cluster and (2) minIsr with time by topic name.
-    StrategyOptions strategyOptions = new StrategyOptions.Builder(_metadataClient.refreshMetadata().cluster())
-        .minIsrWithTimeByTopic(_topicMinIsrCache.minIsrWithTimeByTopic()).build();
-    _executionTaskManager.addExecutionProposals(proposals, brokersToSkipConcurrencyCheck, strategyOptions, replicaMovementStrategy);
+    _executionTaskManager.addExecutionProposals(proposals, brokersToSkipConcurrencyCheck, movementStrategyOptions(loadMonitor),
+                                                 replicaMovementStrategy);
     _concurrencyAdjuster.initAdjustment(loadMonitor,
                                         requestedInterBrokerPartitionMovementConcurrency,
                                         requestedIntraBrokerPartitionMovementConcurrency,
@@ -1744,6 +1781,7 @@ public class Executor {
           int partitionsToMove = numTotalPartitionMovements;
           // Exhaust all the pending partition movements.
           while ((partitionsToMove > 0 || !inExecutionTasks().isEmpty()) && _stopSignal.get() == NO_STOP_EXECUTION) {
+            _executionTaskManager.reorderPendingInterBrokerTasks(movementStrategyOptions(_loadMonitor));
             // Get tasks to execute.
             List<ExecutionTask> tasksToExecute = _executionTaskManager.getInterBrokerReplicaMovementTasks();
             LOG.info("User task {}: Executor will execute {} task(s)", _uuid, tasksToExecute.size());
@@ -1756,6 +1794,9 @@ public class Executor {
               }
               // Execute the tasks.
               _executionTaskManager.markTasksInProgress(tasksToExecute);
+              for (ExecutionTask task : tasksToExecute) {
+                LOG.info("User task {}: Starting inter-broker task {}", _uuid, task);
+              }
               result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute);
             }
             // Wait indefinitely for partition movements to finish.

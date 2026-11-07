@@ -14,9 +14,15 @@
 
 package com.linkedin.kafka.cruisecontrol.executor;
 
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.Extrapolation;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricValues;
+import com.linkedin.cruisecontrol.monitor.sampling.aggregator.ValuesAndExtrapolations;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.executor.recovery.RecoveryController;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
+import com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef;
+import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerEntity;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -48,6 +54,22 @@ import static org.junit.Assert.*;
 public class ExecutorRecoveryControllerTest {
   private static final long INITIAL = 10L * 1024 * 1024;
   private static final long UPDATED = 20L * 1024 * 1024;
+
+  @Test
+  public void testRecoveryOrderingUsesOnlyObservedCpuRatios() {
+    short cpuId = KafkaMetricDef.brokerMetricDef().metricInfo(KafkaMetricDef.CPU_USAGE.name()).id();
+    MetricValues measured = new MetricValues(1);
+    measured.set(0, 0.75);
+    MetricValues invalid = new MetricValues(1);
+    invalid.set(0, 1.25);
+    AggregatedMetricValues values = new AggregatedMetricValues(Map.of(cpuId, measured));
+    Map<BrokerEntity, ValuesAndExtrapolations> metrics = Map.of(
+        new BrokerEntity("measured", 1), new ValuesAndExtrapolations(values, Map.of()),
+        new BrokerEntity("estimated", 2), new ValuesAndExtrapolations(values, Map.of(0, Extrapolation.AVG_ADJACENT)),
+        new BrokerEntity("missing", 3), new ValuesAndExtrapolations(new AggregatedMetricValues(), Map.of()),
+        new BrokerEntity("invalid", 4), new ValuesAndExtrapolations(new AggregatedMetricValues(Map.of(cpuId, invalid)), Map.of()));
+    assertEquals(Map.of(1, 0.75), Executor.recoveryBrokerCpuRatios(metrics));
+  }
 
   @Test
   public void testBothSwitchesAreRequiredAndRequestSuppliesInitialRate() {

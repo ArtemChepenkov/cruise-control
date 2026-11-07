@@ -52,6 +52,7 @@ public class ExecutionTask implements Comparable<ExecutionTask> {
   private static final Map<ExecutionTaskState, Set<ExecutionTaskState>> VALID_TRANSFER = new HashMap<>();
   private final TaskType _type;
   private final long _executionId;
+  private final long _createdTimeMs;
   private final ExecutionProposal _proposal;
   // _brokerId is only relevant for intra-broker replica action, otherwise it will be -1.
   private final int _brokerId;
@@ -82,6 +83,21 @@ public class ExecutionTask implements Comparable<ExecutionTask> {
    *                                     threshold, {@link #maybeReportExecutionTooSlow(long, List)} will be called.
    */
   public ExecutionTask(long executionId, ExecutionProposal proposal, Integer brokerId, TaskType type, long executionAlertingThresholdMs) {
+    this(executionId, proposal, brokerId, type, executionAlertingThresholdMs, 0L);
+  }
+
+  /**
+   * Construct a task with its queue creation time.
+   *
+   * @param executionId task identifier
+   * @param proposal proposal to execute
+   * @param brokerId broker for an intra-broker action, otherwise null
+   * @param type action type
+   * @param executionAlertingThresholdMs slow execution threshold
+   * @param createdTimeMs creation time, or zero for legacy callers without a timestamp
+   */
+  public ExecutionTask(long executionId, ExecutionProposal proposal, Integer brokerId, TaskType type,
+                       long executionAlertingThresholdMs, long createdTimeMs) {
     if (type != TaskType.INTRA_BROKER_REPLICA_ACTION && brokerId != null) {
       throw new IllegalArgumentException("Broker id is specified for non-intra-broker task.");
     }
@@ -90,6 +106,7 @@ public class ExecutionTask implements Comparable<ExecutionTask> {
                                                        executionAlertingThresholdMs, executionId));
     }
     _executionId = executionId;
+    _createdTimeMs = createdTimeMs;
     _proposal = proposal;
     _brokerId = brokerId == null ? -1 : brokerId;
     _state = ExecutionTaskState.PENDING;
@@ -102,6 +119,24 @@ public class ExecutionTask implements Comparable<ExecutionTask> {
 
   public ExecutionTask(long executionId, ExecutionProposal proposal, TaskType type, long executionAlertingThresholdMs) {
     this(executionId, proposal, null, type, executionAlertingThresholdMs);
+  }
+
+  /**
+   * Construct a non-intra-broker task with its queue creation time.
+   *
+   * @param executionId task identifier
+   * @param proposal proposal to execute
+   * @param type action type
+   * @param executionAlertingThresholdMs slow execution threshold
+   * @param createdTimeMs queue creation time
+   */
+  public ExecutionTask(long executionId, ExecutionProposal proposal, TaskType type, long executionAlertingThresholdMs, long createdTimeMs) {
+    this(executionId, proposal, null, type, executionAlertingThresholdMs, createdTimeMs);
+  }
+
+  /** @return the queue creation time, or zero when the caller did not supply one */
+  public long createdTimeMs() {
+    return _createdTimeMs;
   }
 
   /**

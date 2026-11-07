@@ -61,7 +61,7 @@ public class ExecutionTaskManager {
     _inProgressIntraBrokerReplicaMovementsByBrokerId = new HashMap<>();
     _inProgressPartitionsForInterBrokerMovement = new HashSet<>();
     _executionTaskTracker = new ExecutionTaskTracker(dropwizardMetricRegistry, time);
-    _executionTaskPlanner = new ExecutionTaskPlanner(adminClient, config);
+    _executionTaskPlanner = new ExecutionTaskPlanner(adminClient, config, time);
     _executionConcurrencyManager = new ExecutionConcurrencyManager(config);
     _brokersToSkipConcurrencyCheck = new HashSet<>();
     _isKafkaAssignerMode = false;
@@ -80,6 +80,15 @@ public class ExecutionTaskManager {
     return _executionTaskPlanner.getInterBrokerReplicaMovementTasks(
         brokersReadyForReplicaMovement, _inProgressPartitionsForInterBrokerMovement,
         _executionConcurrencyManager.maxClusterInterBrokerPartitionMovements());
+  }
+
+  /**
+   * Refresh priorities for tasks that are still pending.
+   *
+   * @param strategyOptions current cluster metadata
+   */
+  public synchronized void reorderPendingInterBrokerTasks(StrategyOptions strategyOptions) {
+    _executionTaskPlanner.reorderPendingInterBrokerTasks(strategyOptions);
   }
 
   /**

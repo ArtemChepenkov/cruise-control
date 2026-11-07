@@ -535,6 +535,15 @@ public final class ExecutorConfig {
   public static final String RECOVERY_CONTROL_MIN_PROGRESS_CONFIG = "recovery.control.min.progress.bytes.per.second";
   public static final String RECOVERY_CONTROL_NO_PROGRESS_WINDOWS_CONFIG = "recovery.control.no.progress.windows";
 
+  public static final String RECOVERY_RISK_REQUIRED_COPIES_CONFIG = "recovery.risk.required.copies";
+  public static final String RECOVERY_RISK_REQUIRED_DOMAINS_CONFIG = "recovery.risk.required.domains";
+  public static final String RECOVERY_RISK_BANDWIDTH_CONFIG = "recovery.risk.bandwidth.bytes.per.second";
+  public static final String RECOVERY_RISK_CRITICAL_WEIGHT_CONFIG = "recovery.risk.critical.weight";
+  public static final String RECOVERY_RISK_COPY_WEIGHT_CONFIG = "recovery.risk.copy.weight";
+  public static final String RECOVERY_RISK_DOMAIN_WEIGHT_CONFIG = "recovery.risk.domain.weight";
+  public static final String RECOVERY_RISK_AGING_PERIOD_MS_CONFIG = "recovery.risk.aging.period.ms";
+  public static final String RECOVERY_RISK_AGING_BONUS_CONFIG = "recovery.risk.aging.bonus";
+
   private static final long MIB = 1024L * 1024;
 
   private ExecutorConfig() {
@@ -548,6 +557,7 @@ public final class ExecutorConfig {
    */
   public static ConfigDef define(ConfigDef configDef) {
     defineRecoveryControl(configDef);
+    defineRecoveryRisk(configDef);
     return configDef.define(NUM_CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_CONFIG,
                             ConfigDef.Type.INT,
                             DEFAULT_NUM_CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER,
@@ -839,6 +849,31 @@ public final class ExecutorConfig {
                             DEFAULT_AUTO_STOP_EXTERNAL_AGENT,
                             ConfigDef.Importance.MEDIUM,
                             AUTO_STOP_EXTERNAL_AGENT_DOC);
+  }
+
+  private static void defineRecoveryRisk(ConfigDef configDef) {
+    ConfigDef.Validator nonNegativeFinite = (name, value) -> {
+      double number = ((Number) value).doubleValue();
+      if (!Double.isFinite(number) || number < 0) {
+        throw new ConfigException(name, value, "Must be finite and non-negative");
+      }
+    };
+    configDef.define(RECOVERY_RISK_REQUIRED_COPIES_CONFIG, ConfigDef.Type.INT, 3, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Target available copies for recovery task prioritization.")
+             .define(RECOVERY_RISK_REQUIRED_DOMAINS_CONFIG, ConfigDef.Type.INT, 3, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Target distinct racks for recovery task prioritization.")
+             .define(RECOVERY_RISK_BANDWIDTH_CONFIG, ConfigDef.Type.LONG, 20 * MIB, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Calibrated copy bandwidth used to estimate task duration, in bytes per second.")
+             .define(RECOVERY_RISK_CRITICAL_WEIGHT_CONFIG, ConfigDef.Type.DOUBLE, 100.0, nonNegativeFinite,
+                     ConfigDef.Importance.MEDIUM, "Benefit of restoring a second available copy.")
+             .define(RECOVERY_RISK_COPY_WEIGHT_CONFIG, ConfigDef.Type.DOUBLE, 20.0, nonNegativeFinite,
+                     ConfigDef.Importance.MEDIUM, "Benefit of each available copy restored up to the target.")
+             .define(RECOVERY_RISK_DOMAIN_WEIGHT_CONFIG, ConfigDef.Type.DOUBLE, 30.0, nonNegativeFinite,
+                     ConfigDef.Importance.MEDIUM, "Benefit of each rack restored up to the target.")
+             .define(RECOVERY_RISK_AGING_PERIOD_MS_CONFIG, ConfigDef.Type.LONG, 60000L, atLeast(1),
+                     ConfigDef.Importance.MEDIUM, "Waiting time per aging bonus, in milliseconds.")
+             .define(RECOVERY_RISK_AGING_BONUS_CONFIG, ConfigDef.Type.DOUBLE, 0.1, nonNegativeFinite,
+                     ConfigDef.Importance.MEDIUM, "Priority bonus per completed aging period within a risk level.");
   }
 
   private static void defineRecoveryControl(ConfigDef configDef) {

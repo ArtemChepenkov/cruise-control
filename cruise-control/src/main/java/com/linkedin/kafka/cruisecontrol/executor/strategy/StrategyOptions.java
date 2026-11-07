@@ -17,12 +17,14 @@ import static com.linkedin.cruisecontrol.common.utils.Utils.validateNotNull;
 public final class StrategyOptions {
   protected final Cluster _cluster;
   protected final Map<String, MinIsrWithTime> _minIsrWithTimeByTopic;
+  private final Map<Integer, Double> _brokerLoadRatios;
 
   public static class Builder {
     // Required parameters
     private final Cluster _cluster;
     // Optional parameters - initialized to default values
     private Map<String, MinIsrWithTime> _minIsrWithTimeByTopic = Collections.emptyMap();
+    private Map<Integer, Double> _brokerLoadRatios = Collections.emptyMap();
 
     public Builder(Cluster cluster) {
       validateNotNull(cluster, "The cluster cannot be null.");
@@ -41,6 +43,21 @@ public final class StrategyOptions {
       return this;
     }
 
+    /**
+     * @param brokerLoadRatios optional observed utilization ratios between zero and one
+     * @return this builder
+     */
+    public Builder brokerLoadRatios(Map<Integer, Double> brokerLoadRatios) {
+      validateNotNull(brokerLoadRatios, "The broker load ratios cannot be null.");
+      for (double ratio : brokerLoadRatios.values()) {
+        if (!Double.isFinite(ratio) || ratio < 0 || ratio > 1) {
+          throw new IllegalArgumentException("Broker load ratios must be finite and between zero and one");
+        }
+      }
+      _brokerLoadRatios = Map.copyOf(brokerLoadRatios);
+      return this;
+    }
+
     public StrategyOptions build() {
       return new StrategyOptions(this);
     }
@@ -49,6 +66,7 @@ public final class StrategyOptions {
   private StrategyOptions(Builder builder) {
     _cluster = builder._cluster;
     _minIsrWithTimeByTopic = builder._minIsrWithTimeByTopic;
+    _brokerLoadRatios = builder._brokerLoadRatios;
   }
 
   public Cluster cluster() {
@@ -57,5 +75,9 @@ public final class StrategyOptions {
 
   public Map<String, MinIsrWithTime> minIsrWithTimeByTopic() {
     return Collections.unmodifiableMap(_minIsrWithTimeByTopic);
+  }
+
+  public Map<Integer, Double> brokerLoadRatios() {
+    return _brokerLoadRatios;
   }
 }

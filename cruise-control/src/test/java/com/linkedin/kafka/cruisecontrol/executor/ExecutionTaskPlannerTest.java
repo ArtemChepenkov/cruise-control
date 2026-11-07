@@ -15,6 +15,7 @@ import com.linkedin.kafka.cruisecontrol.executor.strategy.PrioritizeLargeReplica
 import com.linkedin.kafka.cruisecontrol.executor.strategy.PrioritizeMinIsrWithOfflineReplicasStrategy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.PrioritizeOneAboveMinIsrWithOfflineReplicasStrategy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.PrioritizeSmallReplicaMovementStrategy;
+import com.linkedin.kafka.cruisecontrol.executor.strategy.RiskAwareReplicaMovementStrategy;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.StrategyOptions;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import java.lang.reflect.Constructor;
@@ -36,6 +37,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.kafka.common.TopicPartitionReplica;
+import org.apache.kafka.common.utils.MockTime;
 import org.easymock.EasyMock;
 import org.junit.Test;
 
@@ -98,6 +100,67 @@ public class ExecutionTaskPlannerTest {
                                                        new Node(4, "null", -1),
                                                        new Node(5, "null", -1));
   private final int _defaultPartitionsMaxCap = ExecutorConfig.DEFAULT_MAX_NUM_CLUSTER_PARTITION_MOVEMENTS_CONFIG;
+
+  @Test
+  public void testRiskRefreshPreservesCreationTimeAndExcludesActiveTasks() {
+    MockTime time = new MockTime(0, 1000, 0);
+    Properties props = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
+    ExecutionTaskPlanner planner = new ExecutionTaskPlanner(null, new KafkaCruiseControlConfig(props), time);
+    Node a = new Node(0, "host", 9092, "a");
+    Node anotherA = new Node(1, "host", 9093, "a");
+    Node b = new Node(2, "host", 9094, "b");
+    Node c = new Node(3, "host", 9095, "c");
+    List<Node> nodes = List.of(a, anotherA, b, c);
+    Node[] replicas = {a, anotherA, b};
+    List<ExecutionProposal> proposals = List.of(
+        new ExecutionProposal(new TopicPartition("large", 0), 100, _r0, List.of(_r0, _r1, _r2), List.of(_r0, _r2, _r3)),
+        new ExecutionProposal(new TopicPartition("small", 0), 10, _r0, List.of(_r0, _r1, _r2), List.of(_r0, _r2, _r3)),
+        new ExecutionProposal(new TopicPartition("active", 0), 1, _r0, List.of(_r0, _r1, _r2), List.of(_r0, _r2, _r3)));
+    List<PartitionInfo> partitions = proposals.stream()
+        .map(p -> new PartitionInfo(p.topic(), 0, a, replicas, replicas)).collect(java.util.stream.Collectors.toList());
+    Cluster cluster = new Cluster("test", nodes, partitions, Set.of(), Set.of());
+    planner.addExecutionProposals(proposals, new StrategyOptions.Builder(cluster).build(), new RiskAwareReplicaMovementStrategy(time));
+    planner.remainingInterBrokerReplicaMovements().forEach(task -> assertEquals(1000, task.createdTimeMs()));
+    Map<Integer, Integer> ready = new HashMap<>(Map.of(0, 1, 1, 1, 2, 1, 3, 1));
+    ExecutionTask active = planner.getInterBrokerReplicaMovementTasks(ready, Set.of(), 1).get(0);
+    assertEquals("active", active.proposal().topic());
+    active.inProgress(time.milliseconds());
+
+    time.sleep(60000);
+    partitions = List.of(new PartitionInfo("large", 0, a, replicas, replicas),
+                         new PartitionInfo("small", 0, a, replicas, new Node[]{a}),
+                         new PartitionInfo("active", 0, a, replicas, replicas));
+    planner.reorderPendingInterBrokerTasks(new StrategyOptions.Builder(new Cluster("test", nodes, partitions, Set.of(), Set.of())).build());
+    assertEquals(ExecutionTaskState.IN_PROGRESS, active.state());
+    assertEquals(1000, active.createdTimeMs());
+    ready = new HashMap<>(Map.of(0, 1, 1, 1, 2, 1, 3, 1));
+    List<ExecutionTask> next = planner.getInterBrokerReplicaMovementTasks(ready, Set.of(active.proposal().topicPartition()), 2);
+    assertEquals(1, next.size());
+    assertEquals("small", next.get(0).proposal().topic());
+    assertEquals(1000, next.get(0).createdTimeMs());
+  }
+
+  @Test
+  public void testDefaultRiskStrategyReceivesConfiguredWeights() {
+    Properties props = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
+    props.setProperty(ExecutorConfig.DEFAULT_REPLICA_MOVEMENT_STRATEGIES_CONFIG, RiskAwareReplicaMovementStrategy.class.getName());
+    props.setProperty(ExecutorConfig.RECOVERY_RISK_DOMAIN_WEIGHT_CONFIG, "0");
+    Node a = new Node(0, "host", 9092, "a");
+    Node anotherA = new Node(1, "host", 9093, "a");
+    Node b = new Node(2, "host", 9094, "b");
+    Node c = new Node(3, "host", 9095, "c");
+    Node[] replicas = {a, anotherA, b};
+    List<ExecutionProposal> proposals = List.of(
+        new ExecutionProposal(new TopicPartition("a-large", 0), 100, _r0, List.of(_r0, _r1, _r2), List.of(_r0, _r2, _r3)),
+        new ExecutionProposal(new TopicPartition("z-small", 0), 1, _r0, List.of(_r0, _r1, _r2), List.of(_r0, _r2, _r3)));
+    Cluster cluster = new Cluster("test", List.of(a, anotherA, b, c),
+        List.of(new PartitionInfo("a-large", 0, a, replicas, replicas), new PartitionInfo("z-small", 0, a, replicas, replicas)),
+        Set.of(), Set.of());
+    ExecutionTaskPlanner planner = new ExecutionTaskPlanner(null, new KafkaCruiseControlConfig(props));
+    planner.addExecutionProposals(proposals, new StrategyOptions.Builder(cluster).build(), null);
+    List<ExecutionTask> first = planner.getInterBrokerReplicaMovementTasks(new HashMap<>(Map.of(0, 1, 1, 1, 2, 1, 3, 1)), Set.of(), 1);
+    assertEquals("a-large", first.get(0).proposal().topic());
+  }
 
   @Test
   public void testGetLeaderMovementTasks() {

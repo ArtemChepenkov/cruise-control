@@ -4,7 +4,6 @@
 
 package com.linkedin.kafka.cruisecontrol.executor;
 
-import com.linkedin.cruisecontrol.common.utils.Utils;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.executor.concurrency.ExecutionConcurrencyManager;
@@ -35,6 +34,7 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TopicPartitionReplica;
+import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -75,6 +75,8 @@ public class ExecutionTaskPlanner {
   private final Map<Long, ExecutionTask> _remainingLeadershipMovements;
   private long _executionId;
   private ReplicaMovementStrategy _defaultReplicaMovementTaskStrategy;
+  private ReplicaMovementStrategy _chosenReplicaMovementTaskStrategy;
+  private final Time _time;
   private final AdminClient _adminClient;
   private final KafkaCruiseControlConfig _config;
   private final long _taskExecutionAlertingThresholdMs;
@@ -90,6 +92,18 @@ public class ExecutionTaskPlanner {
    * @param config The config object that holds all the Cruise Control related configs.
    */
   public ExecutionTaskPlanner(AdminClient adminClient, KafkaCruiseControlConfig config) {
+    this(adminClient, config, Time.SYSTEM);
+  }
+
+  /**
+   * Create the planner with the execution clock used to timestamp pending tasks.
+   *
+   * @param adminClient client for replica log directory information
+   * @param config execution configuration
+   * @param time execution clock
+   */
+  public ExecutionTaskPlanner(AdminClient adminClient, KafkaCruiseControlConfig config, Time time) {
+    _time = time;
     _executionId = 0L;
     _interPartMoveTasksByBrokerId = new HashMap<>();
     _intraPartMoveTasksByBrokerId = new HashMap<>();
@@ -101,20 +115,16 @@ public class ExecutionTaskPlanner {
     _interBrokerReplicaMovementRateAlertingThreshold = config.getDouble(INTER_BROKER_REPLICA_MOVEMENT_RATE_ALERTING_THRESHOLD_CONFIG);
     _intraBrokerReplicaMovementRateAlertingThreshold = config.getDouble(INTRA_BROKER_REPLICA_MOVEMENT_RATE_ALERTING_THRESHOLD_CONFIG);
     _adminClient = adminClient;
-    List<String> defaultReplicaMovementStrategies = config.getList(DEFAULT_REPLICA_MOVEMENT_STRATEGIES_CONFIG);
+    List<ReplicaMovementStrategy> defaultReplicaMovementStrategies =
+        config.getConfiguredInstances(DEFAULT_REPLICA_MOVEMENT_STRATEGIES_CONFIG, ReplicaMovementStrategy.class);
     if (defaultReplicaMovementStrategies == null || defaultReplicaMovementStrategies.isEmpty()) {
       _defaultReplicaMovementTaskStrategy = new BaseReplicaMovementStrategy();
     } else {
-      for (String replicaMovementStrategy : defaultReplicaMovementStrategies) {
-        try {
-          if (_defaultReplicaMovementTaskStrategy == null) {
-            _defaultReplicaMovementTaskStrategy = Utils.newInstance(replicaMovementStrategy, ReplicaMovementStrategy.class);
-          } else {
-            _defaultReplicaMovementTaskStrategy = _defaultReplicaMovementTaskStrategy.chain(Utils.newInstance(replicaMovementStrategy,
-                                                                                                              ReplicaMovementStrategy.class));
-          }
-        } catch (Exception e) {
-          throw new RuntimeException("Error occurred while setting up the replica movement strategy: " + replicaMovementStrategy + ".", e);
+      for (ReplicaMovementStrategy replicaMovementStrategy : defaultReplicaMovementStrategies) {
+        if (_defaultReplicaMovementTaskStrategy == null) {
+          _defaultReplicaMovementTaskStrategy = replicaMovementStrategy;
+        } else {
+          _defaultReplicaMovementTaskStrategy = _defaultReplicaMovementTaskStrategy.chain(replicaMovementStrategy);
         }
       }
 
@@ -195,17 +205,30 @@ public class ExecutionTaskPlanner {
         long executionAlertingThresholdMs = Math.max(Math.round(proposal.dataToMoveInMB() / _interBrokerReplicaMovementRateAlertingThreshold * 1000),
                                                      _taskExecutionAlertingThresholdMs);
         ExecutionTask executionTask = new ExecutionTask(replicaActionExecutionId, proposal, INTER_BROKER_REPLICA_ACTION,
-                                                        executionAlertingThresholdMs);
+                                                        executionAlertingThresholdMs, _time.milliseconds());
         _remainingInterBrokerReplicaMovements.add(executionTask);
         LOG.trace("Added action {} as replica proposal {}", replicaActionExecutionId, proposal);
       }
     }
 
-    ReplicaMovementStrategy chosenReplicaMovementTaskStrategy = replicaMovementStrategy == null
+    _chosenReplicaMovementTaskStrategy = replicaMovementStrategy == null
                                                                 ? _defaultReplicaMovementTaskStrategy
                                                                 : replicaMovementStrategy.chainBaseReplicaMovementStrategyIfAbsent();
-    _interPartMoveTasksByBrokerId = chosenReplicaMovementTaskStrategy.applyStrategy(_remainingInterBrokerReplicaMovements, strategyOptions);
-    _interPartMoveBrokerComparator = brokerComparator(strategyOptions, chosenReplicaMovementTaskStrategy);
+    reorderPendingInterBrokerTasks(strategyOptions);
+  }
+
+  /**
+   * Rebuild pending task priorities from the latest metadata. Already selected tasks are excluded.
+   *
+   * @param strategyOptions current cluster and strategy metadata
+   */
+  public void reorderPendingInterBrokerTasks(StrategyOptions strategyOptions) {
+    Set<ExecutionTask> pending = _remainingInterBrokerReplicaMovements.stream()
+        .filter(task -> task.state() == ExecutionTaskState.PENDING).collect(Collectors.toSet());
+    if (_chosenReplicaMovementTaskStrategy != null) {
+      _interPartMoveTasksByBrokerId = _chosenReplicaMovementTaskStrategy.applyStrategy(pending, strategyOptions);
+      _interPartMoveBrokerComparator = brokerComparator();
+    }
   }
 
   /**
@@ -241,7 +264,7 @@ public class ExecutionTaskPlanner {
             long replicaActionExecutionId = _executionId++;
             ExecutionTask task = new ExecutionTask(replicaActionExecutionId, proposal, r.brokerId(), INTRA_BROKER_REPLICA_ACTION,
                                                    Math.max(Math.round(proposal.dataToMoveInMB() / _intraBrokerReplicaMovementRateAlertingThreshold),
-                                                            _taskExecutionAlertingThresholdMs));
+                                                            _taskExecutionAlertingThresholdMs), _time.milliseconds());
             _intraPartMoveTasksByBrokerId.putIfAbsent(r.brokerId(), new TreeSet<>());
             _intraPartMoveTasksByBrokerId.get(r.brokerId()).add(task);
             _remainingIntraBrokerReplicaMovements.add(task);
@@ -264,7 +287,8 @@ public class ExecutionTaskPlanner {
         if (currentLeader != null && currentLeader.id() != proposal.newLeader().brokerId()) {
           // Get the execution Id for the leader action proposal execution;
           long leaderActionExecutionId = _executionId++;
-          ExecutionTask leaderActionTask = new ExecutionTask(leaderActionExecutionId, proposal, LEADER_ACTION, _taskExecutionAlertingThresholdMs);
+          ExecutionTask leaderActionTask = new ExecutionTask(leaderActionExecutionId, proposal, LEADER_ACTION,
+                                                            _taskExecutionAlertingThresholdMs, _time.milliseconds());
           _remainingLeadershipMovements.put(leaderActionExecutionId, leaderActionTask);
           LOG.trace("Added action {} as leader proposal {}", leaderActionExecutionId, proposal);
         }
@@ -474,6 +498,7 @@ public class ExecutionTaskPlanner {
     _remainingLeadershipMovements.clear();
     _remainingInterBrokerReplicaMovements.clear();
     _remainingIntraBrokerReplicaMovements.clear();
+    _chosenReplicaMovementTaskStrategy = null;
   }
 
   /**
@@ -511,12 +536,14 @@ public class ExecutionTaskPlanner {
    *   <li>The task set size of each broker. Prioritize broker with the larger size</li>
    *   <li>Broker ID integer. Prioritize broker with the smaller ID</li>
    * </ul>
-   * @param strategyOptions Strategy options to be used during application of a replica movement strategy.
-   * @param replicaMovementStrategy The strategy used to compare the order of two given tasks.
    * @return A broker Comparator to decide which among the two given brokers should be picked first when generated replica movement tasks.
    */
-  private Comparator<Integer> brokerComparator(StrategyOptions strategyOptions, ReplicaMovementStrategy replicaMovementStrategy) {
-    Comparator<ExecutionTask> taskComparator = replicaMovementStrategy.taskComparator(strategyOptions);
+  private Comparator<Integer> brokerComparator() {
+    if (_interPartMoveTasksByBrokerId.isEmpty()) {
+      return Integer::compare;
+    }
+    Comparator<? super ExecutionTask> comparator = _interPartMoveTasksByBrokerId.values().iterator().next().comparator();
+    Comparator<? super ExecutionTask> taskComparator = comparator == null ? Comparator.naturalOrder() : comparator;
 
     return (broker1, broker2) -> {
       SortedSet<ExecutionTask> taskSet1 = _interPartMoveTasksByBrokerId.get(broker1);
